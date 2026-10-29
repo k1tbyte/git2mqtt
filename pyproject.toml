@@ -1,0 +1,22 @@
+[project]
+name = "git2mqtt"
+version = "0.1.0"
+description = "Git remote helper that tunnels fetch/push over AWS IoT MQTT"
+requires-python = ">=3.10"
+dependencies = [
+    "awsiotsdk>=1.20",
+    "cryptography>=42",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "amqtt>=0.11"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.hatch.build.targets.wheel]
+packages = ["mqs"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
