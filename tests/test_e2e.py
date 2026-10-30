@@ -1,5 +1,6 @@
 import asyncio
 import os
+import secrets
 import socket
 import subprocess
 import sys
@@ -10,10 +11,7 @@ from pathlib import Path
 import pytest
 from amqtt.broker import Broker
 
-import bundle
-from mqs import crypto
-
-TIMEOUT = 120
+SCRIPT = Path(__file__).parents[1] / "mqs.py"
 IDENTITY = {
     f"GIT_{role}_{field}": value
     for role in ("AUTHOR", "COMMITTER")
@@ -21,63 +19,17 @@ IDENTITY = {
 }
 
 
-def run(args, **kwargs):
-    return subprocess.run(args, capture_output=True, encoding="utf-8", errors="replace", timeout=TIMEOUT, **kwargs)
+def git(repo: Path, *args) -> str:
+    proc = subprocess.run(["git", *map(str, args)], cwd=repo, capture_output=True, text=True, env={**os.environ, **IDENTITY})
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
 
 
-def git_env(tmp: Path, name: str, **extra) -> dict:
-    return {**os.environ, **IDENTITY, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": str(tmp / f"{name}.gitconfig"), **extra}
-
-
-class Sandbox:
-    """Upstream bare repo, a non-tunnelled seed clone that plays 'someone else', and the user's existing local clone."""
-
-    def __init__(self, tmp: Path, helper: Path):
-        self.tmp = tmp
-        self.helper = helper
-        self.base = (tmp / "vcs").as_uri() + "/"
-        self.upstream = tmp / "vcs" / "team" / "app.git"
-        self.seed = tmp / "seed"
-        self.local = tmp / "local"
-        self.plain_env = git_env(tmp, "plain")
-        # The bundle's sh preamble must find this venv's python, git must find the bundle.
-        path = os.pathsep.join([str(helper.parent), str(Path(sys.executable).parent), os.environ["PATH"]])
-        self.client_env = git_env(tmp, "client", PATH=path)
-        self.server_log: list[str] = []
-        self.git("init", "--quiet", "--bare", "-b", "main", self.upstream, cwd=tmp)
-        self.git("clone", "--quiet", self.upstream, self.seed, cwd=tmp)
-        self.commit(self.seed, "one")
-        self.commit(self.seed, "two")
-        self.git("push", "--quiet", "origin", "HEAD:refs/heads/main", cwd=self.seed)
-        self.git("clone", "--quiet", self.base + "team/app.git", self.local, cwd=tmp)
-
-    def git(self, *args, cwd, client=False) -> str:
-        args = [str(a) for a in args]
-        proc = run(["git", *args], cwd=cwd, env=self.client_env if client else self.plain_env)
-        assert proc.returncode == 0, (
-            f"git {' '.join(args)} exited {proc.returncode}\nstdout: {proc.stdout}\nstderr: {proc.stderr}\n"
-            f"server log:\n" + "\n".join(self.server_log)
-        )
-        return proc.stdout.strip()
-
-    def commit(self, repo: Path, name: str) -> str:
-        (repo / f"{name}.txt").write_text(name)
-        self.git("add", ".", cwd=repo)
-        self.git("commit", "--quiet", "-m", name, cwd=repo)
-        return self.git("rev-parse", "HEAD", cwd=repo)
-
-    def push_seed(self) -> str:
-        sha = self.commit(self.seed, "pushed-by-someone-else")
-        self.git("push", "--quiet", "origin", "HEAD:refs/heads/main", cwd=self.seed)
-        return sha
-
-    def upstream_refs(self) -> dict[str, str]:
-        out = self.git("for-each-ref", "--format=%(refname) %(objectname)", cwd=self.upstream)
-        return dict(line.rsplit(" ", 1) for line in out.splitlines())
-
-    def write_config(self, name: str, entries: dict[str, str]):
-        for key, value in entries.items():
-            self.git("config", "--file", self.tmp / f"{name}.gitconfig", key, value, cwd=self.tmp)
+def commit(repo: Path, name: str, size: int = 10) -> str:
+    (repo / f"{name}.txt").write_bytes(secrets.token_bytes(size))  # random: git cannot compress it below the chunk size
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", name)
+    return git(repo, "rev-parse", "HEAD")
 
 
 def free_port() -> int:
@@ -86,145 +38,211 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def wait_for_port(port: int, timeout: float = 30):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            socket.create_connection(("127.0.0.1", port), timeout=1).close()
-            return
-        except OSError:
-            time.sleep(0.1)
-    raise TimeoutError(f"broker did not start listening on port {port}")
-
-
-def stop(proc: subprocess.Popen):
-    if sys.platform == "win32":
-        run(["taskkill", "/F", "/T", "/PID", str(proc.pid)])
-    else:
-        proc.kill()
-    proc.wait()
-
-
 @pytest.fixture(scope="module")
-def broker_port():
+def endpoint():
     port = free_port()
     config = {
         "listeners": {"default": {"type": "tcp", "bind": f"127.0.0.1:{port}"}},
         "plugins": {"amqtt.plugins.authentication.AnonymousAuthPlugin": {"allow_anonymous": True}},
     }
 
-    async def main():
+    async def serve():
         await Broker(config).start()
         await asyncio.Event().wait()
 
-    threading.Thread(target=lambda: asyncio.run(main()), daemon=True).start()
-    wait_for_port(port)
-    return port
+    threading.Thread(target=lambda: asyncio.run(serve()), daemon=True).start()
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=1).close()
+            return f"tcp://127.0.0.1:{port}"
+        except OSError:
+            time.sleep(0.1)
+    raise TimeoutError("broker did not start")
 
 
-@pytest.fixture(scope="module")
-def helper(tmp_path_factory):
-    return bundle.build(tmp_path_factory.mktemp("bin") / "git-remote-mqs")
+class Pair:
+    """Two repos sharing one initial commit; the sender gets ahead, the receiver stays behind."""
+
+    def __init__(self, tmp: Path, endpoint: str):
+        self.sender, self.receiver = tmp / "sender", tmp / "receiver"
+        self.sender.mkdir()
+        git(self.sender, "init", "-q", "-b", "main")
+        self.base = commit(self.sender, "base")
+        git(tmp, "clone", "-q", self.sender, self.receiver)
+        self.env = {**os.environ, "MQS_ENDPOINT": endpoint, "MQS_TOPIC": "mqs", "MQS_KEY": secrets.token_hex(8)}
+
+    def serve(self, answer: str = "y") -> subprocess.Popen:
+        proc = subprocess.Popen([sys.executable, SCRIPT, "--serve", "--idle", "1", str(self.sender)],
+                                cwd=self.sender.parent, env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        assert proc.stdout.readline().startswith("waiting")  # subscribed, safe to ask
+        proc.stdin.write(f"{answer}\n")
+        proc.stdin.flush()
+        return proc
+
+    def start_pull(self) -> subprocess.Popen:
+        return subprocess.Popen([sys.executable, SCRIPT, "--idle", "1"], cwd=self.receiver, env=self.env,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    def pull(self, answer: str | None = "n") -> tuple[str, int]:
+        """`answer` goes to the overwrite question, which only comes up when history was rewritten; None closes stdin."""
+        proc = self.start_pull()
+        return proc.communicate(None if answer is None else f"{answer}\n", timeout=120)[0], proc.returncode
 
 
 @pytest.fixture
-def sandbox(tmp_path, helper):
-    return Sandbox(tmp_path, helper)
+def pair(tmp_path, endpoint):
+    return Pair(tmp_path, endpoint)
 
 
-@pytest.fixture
-def served(sandbox, broker_port):
-    key = crypto.keygen()
-    endpoint = f"tcp://127.0.0.1:{broker_port}"
-    home = sandbox.tmp / "serverhome"
-    home.mkdir()
-    sandbox.write_config("server", {
-        "mqs.endpoint": endpoint, "mqs.key": key, "mqs.upstream": sandbox.base,
-        "url.mqs://.insteadOf": sandbox.base,  # gateway also has the rewrite: mirror must still reach upstream direct
-        "core.hooksPath": str(sandbox.tmp / "global-hooks"),  # must not bypass the mirror's forwarding hook
-    })
-    sandbox.write_config("client", {
-        "mqs.endpoint": endpoint, "mqs.key": key, "url.mqs://.insteadOf": sandbox.base,
-    })
-    proc = subprocess.Popen(
-        [sys.executable, sandbox.helper, "serve"],
-        cwd=home, env=git_env(sandbox.tmp, "server", HOME=str(home), USERPROFILE=str(home)),
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8", errors="replace",
-    )
-    ready = threading.Event()
-
-    def pump():
-        for line in proc.stdout:
-            sandbox.server_log.append(line.rstrip())
-            if line.startswith("serving"):
-                ready.set()
-
-    threading.Thread(target=pump, daemon=True).start()
-    try:
-        assert ready.wait(60), "mqs serve did not start:\n" + "\n".join(sandbox.server_log)
-        yield sandbox
-    finally:
-        stop(proc)
+def test_fast_forwards_checked_out_branch(pair):
+    server = pair.serve()
+    head = commit(pair.sender, "one")
+    out, code = pair.pull()
+    assert code == 0, out
+    assert server.wait(30) == 0
+    assert git(pair.receiver, "rev-parse", "HEAD") == head
+    assert (pair.receiver / "one.txt").exists()
 
 
-def test_fetch_gets_new_upstream_commit(served):
-    pushed = served.push_seed()
-
-    served.git("fetch", "origin", cwd=served.local, client=True)
-
-    assert served.git("rev-parse", "origin/main", cwd=served.local) == pushed
-    assert served.upstream_refs()["refs/heads/main"] == pushed
-
-
-def test_push_updates_upstream_main(served):
-    head = served.commit(served.local, "local")
-
-    served.git("push", "origin", "HEAD:main", cwd=served.local, client=True)
-
-    assert served.upstream_refs()["refs/heads/main"] == head
+def test_multi_chunk_transfer(pair):
+    server = pair.serve()
+    head = commit(pair.sender, "big", size=300 * 1024)
+    out, code = pair.pull()
+    assert code == 0, out
+    assert "sent 5/5" in server.communicate(timeout=30)[0]
+    assert git(pair.receiver, "rev-parse", "HEAD") == head
 
 
-def test_push_of_several_refs(served):
-    head = served.commit(served.local, "local")
-
-    names = ["refs/heads/f1", "refs/heads/фича", "refs/heads/nb sp"]
-    served.git("push", "origin", *(f"HEAD:{name}" for name in names), cwd=served.local, client=True)
-
-    refs = served.upstream_refs()
-    assert [refs[name] for name in names] == [head] * len(names)
-
-
-def test_delete_removes_upstream_branch(served):
-    served.git("push", "origin", "HEAD:refs/heads/f1", cwd=served.local, client=True)
-    assert "refs/heads/f1" in served.upstream_refs()
-
-    served.git("push", "origin", "--delete", "f1", cwd=served.local, client=True)
-
-    assert "refs/heads/f1" not in served.upstream_refs()
+def test_updates_ref_when_branch_is_not_checked_out(pair):
+    git(pair.receiver, "checkout", "-q", "-b", "other")
+    server = pair.serve()
+    head = commit(pair.sender, "one")
+    assert pair.pull()[1] == 0
+    assert server.wait(30) == 0
+    assert git(pair.receiver, "rev-parse", "main") == head
+    assert git(pair.receiver, "rev-parse", "HEAD") == pair.base  # untouched
 
 
-def test_serve_exits_when_idle(sandbox, broker_port):
-    sandbox.write_config("server", {
-        "mqs.endpoint": f"tcp://127.0.0.1:{broker_port}", "mqs.key": crypto.keygen(), "mqs.upstream": sandbox.base,
-    })
+def test_empty_receiver_gets_the_whole_branch(pair, tmp_path):
+    pair.receiver = tmp_path / "empty"
+    pair.receiver.mkdir()
+    git(pair.receiver, "init", "-q", "-b", "main")
+    server = pair.serve()
+    head = commit(pair.sender, "one")
+    out, code = pair.pull()
+    assert code == 0, out
+    assert server.wait(30) == 0
+    assert git(pair.receiver, "rev-parse", "HEAD") == head
 
-    proc = run([sys.executable, sandbox.helper, "serve", "--idle", "0.02"], env=git_env(sandbox.tmp, "server"))
 
-    assert proc.returncode == 0 and "closing connection" in proc.stdout, proc.stdout + proc.stderr
+def test_branch_name_shared_with_a_tag(pair):
+    git(pair.sender, "tag", "main")
+    server = pair.serve()
+    head = commit(pair.sender, "one")
+    assert pair.pull()[1] == 0
+    assert server.wait(30) == 0
+    assert git(pair.receiver, "rev-parse", "HEAD") == head
 
 
-def test_forward_rejects_stale_lease(sandbox):
-    mirror = sandbox.tmp / "mirror.git"
-    sandbox.git("clone", "--quiet", "--bare", sandbox.upstream, mirror, cwd=sandbox.tmp)
-    old = sandbox.git("rev-parse", "refs/heads/main", cwd=mirror)
-    new = sandbox.git("commit-tree", f"{old}^{{tree}}", "-p", old, "-m", "mine", cwd=mirror)
-    advanced = sandbox.push_seed()
+def test_receiver_may_start_first(pair):
+    receiver = pair.start_pull()
+    time.sleep(1)  # its first request goes out before anyone listens
+    head = commit(pair.sender, "one")
+    server = pair.serve()
+    out = receiver.communicate(timeout=60)[0]
+    assert receiver.returncode == 0, out
+    assert server.wait(30) == 0
+    assert git(pair.receiver, "rev-parse", "HEAD") == head
 
-    proc = run(
-        [sys.executable, "-m", "mqs.forward"], cwd=mirror, input=f"{old} {new} refs/heads/main\n",
-        env={**sandbox.plain_env, "GIT_DIR": str(mirror), "LC_ALL": "C"},
-    )
 
-    assert proc.returncode != 0, f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
-    assert "stale info" in proc.stderr, proc.stderr
-    assert sandbox.upstream_refs()["refs/heads/main"] == advanced
+def test_path_that_is_not_a_repo_fails(pair, tmp_path):
+    proc = subprocess.run([sys.executable, SCRIPT, str(tmp_path / "missing")], env=pair.env, capture_output=True,
+                          text=True, timeout=30)
+    assert proc.returncode == 1
+    assert "is not a git repo" in proc.stderr
+
+
+def test_declined_sends_nothing(pair):
+    server = pair.serve("n")
+    commit(pair.sender, "one")
+    out, code = pair.pull()
+    assert code == 1
+    assert "declined" in out
+    assert server.wait(30) == 1
+    assert git(pair.receiver, "rev-parse", "HEAD") == pair.base
+
+
+def test_nothing_new_reports_error(pair):
+    server = pair.serve()
+    out, code = pair.pull()
+    assert code == 1
+    assert server.wait(30) == 1
+
+
+def test_diverged_receiver_keeps_its_commits_when_declined(pair):
+    theirs = commit(pair.receiver, "theirs")
+    server = pair.serve()
+    commit(pair.sender, "mine")
+    out, code = pair.pull("n")
+    assert code == 1
+    assert "declined" in out
+    assert server.wait(30) == 1
+    assert git(pair.receiver, "rev-parse", "HEAD") == theirs
+
+
+def test_closed_stdin_counts_as_declined(pair):
+    theirs = commit(pair.receiver, "theirs")
+    server = pair.serve()
+    commit(pair.sender, "mine")
+    out, code = pair.pull(None)
+    assert code == 1
+    assert "Traceback" not in out
+    assert server.wait(30) == 1
+    assert git(pair.receiver, "rev-parse", "HEAD") == theirs
+
+
+def test_staged_changes_block_an_overwrite(pair):
+    theirs = commit(pair.receiver, "theirs")
+    (pair.receiver / "wip.txt").write_text("wip")
+    git(pair.receiver, "add", "wip.txt")
+    server = pair.serve()
+    commit(pair.sender, "mine")
+    out, code = pair.pull("y")
+    assert code == 1
+    assert "staged" in out
+    assert server.wait(30) == 1
+    assert git(pair.receiver, "rev-parse", "HEAD") == theirs
+    assert git(pair.receiver, "diff", "--cached", "--name-only") == "wip.txt"
+
+
+def test_bare_receiver_moves_its_default_branch(pair, tmp_path):
+    pair.receiver = tmp_path / "bare.git"
+    git(tmp_path, "clone", "-q", "--bare", pair.sender, pair.receiver)
+    server = pair.serve()
+    head = commit(pair.sender, "one")
+    out, code = pair.pull()
+    assert code == 0, out
+    assert server.wait(30) == 0
+    assert git(pair.receiver, "rev-parse", "main") == head
+
+
+@pytest.mark.parametrize("prune", [False, True], ids=["old-tip-still-known", "old-tip-gone"])
+def test_rewritten_history_overwrites_from_newest_shared_commit(pair, prune):
+    server = pair.serve()
+    commit(pair.sender, "big", size=300 * 1024)
+    assert pair.pull()[1] == 0
+    assert server.wait(30) == 0
+    git(pair.sender, "commit", "-q", "--amend", "-m", "rewritten")  # what a rebase does to the receiver's tip
+    new = commit(pair.sender, "after")
+    if prune:
+        git(pair.sender, "reflog", "expire", "--expire=now", "--all")
+        git(pair.sender, "gc", "-q", "--prune=now")
+    server = pair.serve()
+    out, code = pair.pull("y")
+    sent = server.communicate(timeout=30)[0]
+    assert code == 0, out
+    assert git(pair.receiver, "rev-parse", "HEAD") == new
+    assert "whole branch" not in sent  # found a shared commit, even with the old tip pruned
+
+
