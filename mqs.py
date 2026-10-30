@@ -6,10 +6,12 @@
 
   python mqs.py --serve [REPO]   machine with the commits: offers the current branch of REPO
   python mqs.py [REPO]           repo that needs them: says where it is, applies what arrives
+  python mqs.py --clip STEP      same by clipboard, no network: ask (receiver), send (sender), apply (receiver)
 
 REPO defaults to the current directory.
 """
 import argparse
+import base64
 import hashlib
 import os
 import queue
@@ -23,9 +25,6 @@ import time
 import uuid
 from pathlib import Path
 
-from awscrt import auth, mqtt
-from awsiot import mqtt_connection_builder
-
 CHUNK = 64 * 1024  # AWS IoT messages are capped at 128 KiB
 RATE = 400 * 1024  # bytes/s, below the AWS IoT 512 KiB/s per-connection cap
 MIN_GAP = 0.02  # s, below the AWS IoT 100 publishes/s per-connection cap
@@ -35,9 +34,13 @@ RESULT_TIMEOUT = 300  # the receiver may be waiting on a y/n
 HISTORY = 50  # commits the receiver lists, so the sender can find a shared one after a rebase
 HASH = re.compile(r"[0-9a-f]{40,64}")
 CONNECT_TIMEOUT = 30
-QOS = mqtt.QoS.AT_LEAST_ONCE
 HEADER = struct.Struct(">BI")  # kind, seq
 HELLO, OFFER, DATA, OK, ERROR = range(5)
+CLIPBOARD = {  # (copy, paste) commands
+    "win32": (["clip"], ["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"]),
+    "darwin": (["pbcopy"], ["pbpaste"]),
+    "linux": (["xclip", "-selection", "clipboard"], ["xclip", "-selection", "clipboard", "-o"]),
+}
 
 
 def main():
@@ -46,6 +49,8 @@ def main():
     parser.add_argument("--serve", action="store_true", help="send the repo's current branch instead of receiving")
     parser.add_argument("--idle", type=float, default=2, metavar="MIN",
                         help="give up after MIN minutes without a peer (default 2)")
+    parser.add_argument("--clip", choices=["ask", "send", "apply"],
+                        help="pass messages by clipboard instead of MQTT: ask and apply on the receiver, send on the sender")
     args = parser.parse_args()
     load_dotenv()  # before chdir: argv[0] may be a relative path
     try:
@@ -53,11 +58,28 @@ def main():
         git("rev-parse", "--git-dir")
     except (OSError, RuntimeError) as e:
         sys.exit(f"mqs: {args.repo} is not a git repo - {e}")
-    (serve if args.serve else pull)(args.idle * 60)
+    if args.clip:
+        try:
+            clip(args.clip)
+        except RuntimeError as e:
+            sys.exit(f"mqs: {e}")
+    else:
+        (serve if args.serve else pull)(args.idle * 60)
+
+
+def current_branch() -> str:
+    return git("branch", "--show-current") or sys.exit("mqs: detached HEAD, check out a branch first")
+
+
+def local_history() -> str:
+    try:
+        return git("rev-list", f"--max-count={HISTORY}", "HEAD")
+    except RuntimeError:
+        return ""  # no commits yet: the sender ships the whole branch
 
 
 def serve(idle: float):
-    branch = git("branch", "--show-current") or sys.exit("mqs: detached HEAD, check out a branch first")
+    branch = current_branch()
     link = Link(serving=True)
     try:
         link.listen()
@@ -119,10 +141,7 @@ def outcome(link: "Link", sid: str) -> tuple[int, str]:
 
 
 def pull(idle: float):
-    try:
-        history = git("rev-list", f"--max-count={HISTORY}", "HEAD")
-    except RuntimeError:
-        history = ""  # no commits yet: the sender ships the whole branch
+    history = local_history()
     sid = secrets.token_hex(8)
     link = Link(serving=False)
     try:
@@ -193,6 +212,38 @@ def apply(data: bytes) -> str:
     return f"{branch} -> {new[:10]}"
 
 
+def clip(step: str):
+    if step == "ask":
+        to_clipboard("ask", local_history().encode())
+        print("request copied, run `--clip send` on the sender")
+    elif step == "send":
+        branch = current_branch()
+        bundle = make_bundle(branch, from_clipboard("ask").decode().split())
+        to_clipboard("bundle", bundle)
+        print(f"{branch}: {_human(len(bundle))} copied, run `--clip apply` on the receiver")
+    else:
+        print(apply(from_clipboard("bundle")))
+
+
+def to_clipboard(tag: str, data: bytes):
+    _clipboard(0, f"mqs-{tag}\n{base64.encodebytes(data).decode()}".encode())
+
+
+def from_clipboard(tag: str) -> bytes:
+    head, _, body = _clipboard(1).decode(errors="replace").partition("\n")
+    if head.strip() != f"mqs-{tag}":
+        raise RuntimeError(f"the clipboard has no mqs-{tag} message, copy it on the other machine first")
+    return base64.b64decode(body)  # ignores the line breaks that copying may rewrite
+
+
+def _clipboard(i: int, data: bytes = b"") -> bytes:
+    cmd = CLIPBOARD[sys.platform][i]
+    try:
+        return subprocess.run(cmd, input=data, capture_output=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise RuntimeError(f"{cmd[0]} failed - {e}") from None
+
+
 def confirm(question: str) -> bool:
     try:
         return input(f"{question} [y/N] ").strip().lower() == "y"
@@ -242,7 +293,11 @@ class Link:
     """
 
     def __init__(self, serving: bool):
+        from awscrt import auth, mqtt  # here, so --clip runs without the SDK
+        from awsiot import mqtt_connection_builder
+
         endpoint = need("MQS_ENDPOINT")
+        self._qos = mqtt.QoS.AT_LEAST_ONCE
         channel = hashlib.blake2b(need("MQS_KEY").encode(), digest_size=8).hexdigest()
         self._base = f"{need('MQS_TOPIC')}/{channel}"
         self._out, self._in = ("down", "up") if serving else ("up", "down")
@@ -264,14 +319,14 @@ class Link:
         self._conn.connect().result(CONNECT_TIMEOUT)
 
     def listen(self, sid: str = "+"):
-        future, _ = self._conn.subscribe(f"{self._base}/{sid}/{self._in}", QOS, self._on_message)
+        future, _ = self._conn.subscribe(f"{self._base}/{sid}/{self._in}", self._qos, self._on_message)
         future.result(CONNECT_TIMEOUT)
 
     def send(self, sid: str, kind: int, payload: bytes = b"", seq: int = 0):
         time.sleep(max(0.0, self._next_at - time.monotonic()))  # pacing, not a bucket: idle time must not become a burst
         frame = HEADER.pack(kind, seq) + payload
         self._next_at = time.monotonic() + max(MIN_GAP, len(frame) / RATE)
-        future, _ = self._conn.publish(f"{self._base}/{sid}/{self._out}", frame, QOS)
+        future, _ = self._conn.publish(f"{self._base}/{sid}/{self._out}", frame, self._qos)
         future.result(CONNECT_TIMEOUT)
 
     def recv(self, timeout: float) -> tuple[str, int, int, bytes]:

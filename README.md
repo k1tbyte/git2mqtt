@@ -41,6 +41,21 @@ python mqs.py --serve
 python mqs.py
 ```
 
+## Without MQTT (clipboard)
+
+No `.env` or SDK needed. Windows (`clip`), macOS (`pbcopy`), Linux (`xclip`).
+
+```sh
+# receiver: copies what it has
+python mqs.py --clip ask
+
+# sender: reads that, copies the bundle
+python mqs.py --clip send
+
+# receiver: applies the bundle from the clipboard
+python mqs.py --clip apply
+```
+
 ## Repo path
 
 Default is the current directory.
