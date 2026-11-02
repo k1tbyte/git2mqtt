@@ -6,7 +6,8 @@
 
   python mqs.py --serve [REPO]   machine with the commits: offers the current branch of REPO
   python mqs.py [REPO]           repo that needs them: says where it is, applies what arrives
-  python mqs.py --clip STEP      same by clipboard, no network: ask (receiver), send (sender), apply (receiver)
+  python mqs.py --clip STEP      same by clipboard, no network: ask (receiver), send (sender), apply (receiver);
+                                 without ask, send builds on the last commit received from the other side, else the upstream
 
 REPO defaults to the current directory.
 """
@@ -209,6 +210,10 @@ def apply(data: bytes) -> str:
         git("reset", "--keep", new)  # aborts instead of clobbering local edits
     else:
         git("merge", "--ff-only", "--no-autostash", "--no-overwrite-ignore", new)  # neither may touch local files
+    try:  # the sender has it: base for `--clip send` without ask
+        git("update-ref", f"refs/mqs/{branch}", new)
+    except RuntimeError:
+        pass  # a stale refs/mqs/<parent or child> holds the name, send falls back to the upstream
     return f"{branch} -> {new[:10]}"
 
 
@@ -218,7 +223,13 @@ def clip(step: str):
         print("request copied, run `--clip send` on the sender")
     elif step == "send":
         branch = current_branch()
-        bundle = make_bundle(branch, from_clipboard("ask").decode().split())
+        try:
+            history = from_clipboard("ask").decode().split()
+        except RuntimeError:  # unbundle on the receiver fails if it lacks the base
+            base = f"refs/mqs/{branch}" if has_commit(f"refs/mqs/{branch}") else "@{upstream}"
+            history = [git("rev-parse", base)]
+            print(f"no ask in the clipboard, sending what is past {git('rev-parse', '--abbrev-ref', base)}")
+        bundle = make_bundle(branch, history)
         to_clipboard("bundle", bundle)
         print(f"{branch}: {_human(len(bundle))} copied, run `--clip apply` on the receiver")
     else:

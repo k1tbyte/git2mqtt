@@ -56,6 +56,8 @@ python mqs.py --clip send
 python mqs.py --clip apply
 ```
 
+`ask` is needed only the first time a branch moves. Without it, `send` ships what is past the last commit this repo received for the branch (`refs/mqs/<branch>`), else past its upstream (`origin/<branch>`). If the receiver lacks that commit, `apply` fails and changes nothing.
+
 ## Repo path
 
 Default is the current directory.
