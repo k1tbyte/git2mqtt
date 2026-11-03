@@ -1,18 +1,26 @@
-"""mqs install / uninstall: deps, key, git config and PATH. Stdlib only - it runs before deps exist.
+"""mqs install / uninstall: deps, .env, and on the local machine git rewrite and PATH. Stdlib only - it runs before deps exist.
 
 Every side effect is printed as it happens (what, and where), so the whole run is auditable.
 """
 import getpass
-import json
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+from . import envfile
+
 COMMAND = "mqs"
 GIT_HELPER = "git-remote-mqs"  # git looks up remote helpers by this exact name
 DEPS = ["awsiotsdk>=1.20", "cryptography>=42"]
+REQUIRED = {  # .env settings install asks for when missing; MQS_TOPIC, MQS_REGION, MQS_PROFILE are optional
+    "MQS_ENDPOINT": "MQS_ENDPOINT (AWS IoT endpoint)",
+    "MQS_UPSTREAM": "MQS_UPSTREAM (start of your repo URLs, with the trailing /)",
+    "MQS_KEY": "MQS_KEY (same on both machines, Enter = use the generated one)",
+    "AWS_ACCESS_KEY_ID": "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY": "AWS_SECRET_ACCESS_KEY",
+}
 
 
 def main():
@@ -21,26 +29,19 @@ def main():
     bundle.chmod(0o755)
     print(f"made {bundle} executable (755)")
 
-    conf = read_config()
-    py = ensure_venv(here)
     local = ask_choice("This machine is the", ["local workstation", "gateway that reaches the git server"]) == 0
-    write_env(here)
-    key = make_key(py, bundle) if local else ask("Paste the key printed by the local install")
+    py = ensure_venv(here) if local else Path(sys.executable)  # the gateway runs on its own python with the deps preinstalled
+    env = complete_env(here, py, bundle)
 
-    print("\ngit config (global):")
-    set_cfg("mqs.endpoint", conf["endpoint"])
-    for name in ("region", "topic"):
-        if conf.get(name):
-            set_cfg(f"mqs.{name}", conf[name])
-    set_cfg("mqs.key", key)
-    set_cfg("url.mqs://.insteadOf" if local else "mqs.upstream", conf["prefix"])
-
-    print("commands on PATH:")
-    install_commands(here, bundle)
-
-    print("\ndone.")
-    print("use git as usual - matching URLs tunnel automatically." if local
-          else f"start the gateway while you work: {COMMAND} serve")
+    if local:
+        print("\ngit config (global):")
+        set_cfg("url.mqs://.insteadOf", env["MQS_UPSTREAM"])
+        print("commands on PATH:")
+        install_commands(here, bundle)
+        print(f"\ndone.\nuse git as usual - matching URLs tunnel automatically.\n"
+              f"On the gateway: put {bundle.name} and this .env into one folder and run `python {bundle.name} install`.")
+    else:  # the gateway needs no git config and no PATH
+        print(f"\ndone.\nstart the gateway while you work, from {here}:\n  python {bundle.name} serve")
 
 
 def ensure_venv(here: Path) -> Path:
@@ -56,24 +57,29 @@ def ensure_venv(here: Path) -> Path:
     return py
 
 
-def write_env(here: Path):
-    env = here / ".env"
-    if env.is_file() and ask_yes(f"{env.name} already exists, keep it?", True):
-        print(f"kept existing {env}")
-    else:
-        key_id = ask("AWS_ACCESS_KEY_ID")
-        secret = getpass.getpass("AWS_SECRET_ACCESS_KEY (hidden): ").strip()
-        env.write_text(f"AWS_ACCESS_KEY_ID={key_id}\nAWS_SECRET_ACCESS_KEY={secret}\n", encoding="utf-8")
-        print(f"wrote AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY to {env}")
+def complete_env(here: Path, py: Path, bundle: Path) -> dict[str, str]:
+    """Asks only for what .env lacks, so a ready .env (the same one on both machines) needs no answers."""
+    path = here / ".env"
+    env = envfile.read(path)
+    added = {}
+    for name, prompt in REQUIRED.items():
+        if env.get(name) or (name.startswith("AWS_") and env.get("MQS_PROFILE")):
+            continue
+        if name == "AWS_SECRET_ACCESS_KEY":
+            added[name] = getpass.getpass(f"{prompt} (hidden): ").strip()
+        elif name == "MQS_KEY":
+            added[name] = ask(prompt, run([str(py), str(bundle), "keygen"], capture=True).strip())
+        else:
+            added[name] = ask(prompt)
+    if added:
+        old = path.read_text(encoding="utf-8-sig").splitlines() if path.is_file() else []
+        lines = [line for line in old if line.partition("=")[0].strip() not in added]  # blank placeholders would win over ours
+        path.write_text("\n".join(lines + [f"{name}={value}" for name, value in added.items()]) + "\n", encoding="utf-8")
+        print(f"added {', '.join(added)} to {path}")
     if os.name != "nt":
-        env.chmod(0o600)
-        print(f"set {env} mode to 600")
-
-
-def make_key(py: Path, bundle: Path) -> str:
-    key = run([str(py), str(bundle), "keygen"], capture=True).strip()
-    print(f"\n  KEY: {key}\n  Copy it, then run `{COMMAND} install` on the gateway and paste it.\n")
-    return key
+        path.chmod(0o600)
+        print(f"set {path} mode to 600")
+    return env | added
 
 
 def install_commands(here: Path, bundle: Path):
@@ -136,7 +142,8 @@ def uninstall():
             if link.is_symlink():
                 link.unlink()
                 print(f"removed symlink {link}")
-    _rmtree(Path.home() / ".mqs")
+    _rmtree(here / "mirrors")
+    _rmtree(Path.home() / ".mqs")  # mirrors of older installs
     _rmtree(here / ".venv")
     print(f"\ndone. the {bundle.name} file is kept - delete it by hand if you want.")
 
@@ -159,19 +166,6 @@ def _win_path(root) -> str:
         return winreg.QueryValueEx(root, "Path")[0]
     except FileNotFoundError:
         return ""
-
-
-def read_config() -> dict:
-    """Shared, non-secret settings handed out as one JSON: endpoint, prefix, optional region and topic."""
-    raw = ask("Paste the config JSON from your admin (or a path to a .json file)")
-    source = Path(raw)
-    try:
-        conf = json.loads(source.read_text(encoding="utf-8") if source.is_file() else raw)
-    except (json.JSONDecodeError, OSError, ValueError):
-        sys.exit("mqs: config is not valid JSON")
-    if not (conf.get("endpoint") and conf.get("prefix")):
-        sys.exit('mqs: config needs "endpoint" and "prefix"')
-    return conf
 
 
 def git_sections(pattern: str) -> set[str]:
@@ -210,11 +204,6 @@ def ask_choice(prompt: str, options: list[str]) -> int:
         value = input(f"{prompt} [1-{len(options)}]: ").strip()
         if value.isdigit() and 1 <= int(value) <= len(options):
             return int(value) - 1
-
-
-def ask_yes(prompt: str, default: bool) -> bool:
-    value = input(f"{prompt} [{'Y/n' if default else 'y/N'}]: ").strip().lower()
-    return default if not value else value.startswith("y")
 
 
 def run(cmd: list[str], capture: bool = False, check: bool = True) -> str:

@@ -6,7 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path.home() / ".mqs" / "mirrors"
+from . import envfile
+
 PKG_ROOT = Path(__file__).absolute().parents[1]  # project dir or the bundle file itself
 PATH_RE = re.compile(r"[\w.-]+(/[\w.-]+)*")
 REFSPECS = ("+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*")  # skips server-side refs like merge-requests
@@ -16,8 +17,8 @@ def sync(upstream: str, path: str) -> str:
     """Clones or refreshes the mirror so the advertised refs match upstream right now."""
     if not PATH_RE.fullmatch(path) or ".." in path.split("/"):
         raise ValueError(f"bad repo path {path!r}")
-    # Keyed by upstream too, so a changed mqs.upstream never reuses another server's mirror.
-    repo = ROOT / hashlib.sha1(upstream.encode()).hexdigest()[:8] / path
+    # Keyed by upstream too, so a changed MQS_UPSTREAM never reuses another server's mirror.
+    repo = envfile.app_dir() / "mirrors" / hashlib.sha1(upstream.encode()).hexdigest()[:8] / path
     url = upstream + path
     if _is_repo(repo):
         _git(*direct(url), "-C", str(repo), "fetch", "--quiet", "--prune", "origin")

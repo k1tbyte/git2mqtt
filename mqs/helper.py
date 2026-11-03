@@ -34,18 +34,18 @@ def tunnel(path: str, service: str) -> int:
         stream = Stream(broker, cfg, secrets.token_hex(8), b"c")
         broker.subscribe(stream.recv_topic, lambda _, frame: stream.feed(frame))
         stream.send(HELLO, json.dumps({"service": service, "path": path, "ts": time.time()}).encode())
-        return relay(stream)
+        return relay(stream, cfg.base)
     finally:
         broker.close()
 
 
-def relay(stream: Stream) -> int:
+def relay(stream: Stream, base: str) -> int:
     out, err = sys.stdout.buffer, sys.stderr.buffer
     while True:
         try:
             kind, data = stream.recv(IDLE)
         except TimeoutError:
-            return fail(f"no response for {IDLE}s, is `mqs serve` running on the gateway?")
+            return fail(f"no response for {IDLE}s on {base}, is `mqs serve` running on the gateway with the same channel?")
         if kind == READY:
             # Git starts talking only after this blank line, so serve is already listening.
             out.write(b"\n")

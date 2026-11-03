@@ -9,6 +9,8 @@ import tempfile
 import zipapp
 from pathlib import Path
 
+from mqs.install import DEPS
+
 ROOT = Path(__file__).parent
 # Git for Windows runs extensionless helpers through sh; python skips this prefix when opening the zip.
 # Resolve one symlink level (unix installs link into ~/.local/bin) so the .venv next to the real file wins.
@@ -37,5 +39,15 @@ def build(out: Path) -> Path:
     return out
 
 
+def write_launcher(bundle: Path) -> Path:
+    """mqs.sh next to the bundle: runs it through uv, so no .venv is needed (the deps come from install.DEPS)."""
+    out = bundle.with_name("mqs.sh")
+    withs = " ".join(f"--with '{dep}'" for dep in DEPS)
+    out.write_text(f'#!/bin/sh\nexec uv run --no-project --quiet {withs} python "$(dirname "$0")/{bundle.name}" "$@"\n')
+    out.chmod(0o755)
+    return out
+
+
 if __name__ == "__main__":
-    print(build(Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "dist" / "mqs"))
+    dist = build(Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "dist" / "mqs")
+    print(dist, write_launcher(dist))

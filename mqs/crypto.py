@@ -1,8 +1,6 @@
 import base64
-import binascii
 import hashlib
 import secrets
-import sys
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
@@ -12,15 +10,9 @@ def keygen() -> str:
     return "-".join(raw[i:i + 4] for i in range(0, len(raw), 4))
 
 
-def parse_key(text: str) -> bytes:
-    raw = text.replace("-", "").replace(" ", "").upper()
-    try:
-        key = base64.b32decode(raw + "=" * (-len(raw) % 8))
-    except binascii.Error:
-        key = b""
-    if len(key) != 16:
-        sys.exit("mqs: malformed key, expected the output of `mqs keygen`")
-    return key
+def derive_key(text: str) -> bytes:
+    """Any string works, as in the single-file version; `mqs keygen` makes a strong one."""
+    return hashlib.blake2b(text.encode(), digest_size=32, person=b"mqs-key").digest()
 
 
 def channel(key: bytes) -> str:

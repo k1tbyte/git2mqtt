@@ -68,7 +68,7 @@ def serve(idle_min: float = 2):
 
     broker.subscribe(f"{cfg.base}/+/c", on_frame)
     stop = f"idle {idle_min:g} min" if idle else "Ctrl+C"
-    print(f"serving {cfg.upstream}, stops on {stop}", flush=True)
+    print(f"serving {cfg.upstream} on {cfg.base}, stops on {stop}", flush=True)
     try:
         while not closing:
             time.sleep(min(idle or 3600, 30))  # bounded: Event.wait() ignores Ctrl+C on Windows

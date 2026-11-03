@@ -1,15 +1,9 @@
 import os
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import crypto
-
-DEFAULTS = {
-    "mqs.topic": "mqs",  # both sides must match; override to blend into existing IoT traffic
-    "mqs.profile": "",
-}
+from . import crypto, envfile
 
 
 @dataclass(frozen=True)
@@ -27,34 +21,26 @@ class Config:
 
 
 def load_dotenv():
-    """AWS creds may sit in a .env next to the bundle; real env vars win."""
-    path = Path(sys.argv[0]).resolve().parent / ".env"  # resolve: unix installs reach it via a symlink
-    if path.is_file():
-        for line in path.read_text(encoding="utf-8-sig").splitlines():
-            name, sep, value = line.partition("=")
-            if sep and not name.strip().startswith("#"):
-                os.environ.setdefault(name.strip(), value.strip().strip("'\""))
+    """Settings may sit in a .env next to the bundle; real env vars win."""
+    for name, value in envfile.read(envfile.app_dir() / ".env").items():
+        os.environ.setdefault(name, value)
 
 
 def load(server: bool = False) -> Config:
-    """Reads the mqs.* section, identical on both sides; upstream is server-only."""
+    """Reads MQS_* from env/.env, identical on both sides; MQS_UPSTREAM is server-only."""
     load_dotenv()
-    out = subprocess.run(["git", "config", "--get-regexp", r"^mqs\."], capture_output=True, encoding="utf-8").stdout
-    values = {**DEFAULTS, **dict(line.partition(" ")[::2] for line in out.splitlines())}
 
     def need(name: str) -> str:
-        if not values.get(name):
-            sys.exit(f"mqs: missing setting, run: git config --global {name} <value>")
-        return values[name]
+        return os.environ.get(name) or sys.exit(f"mqs: set {name} in .env next to the mqs file")
 
-    endpoint = need("mqs.endpoint")
+    endpoint = need("MQS_ENDPOINT")
     return Config(
-        key=crypto.parse_key(need("mqs.key")),
+        key=crypto.derive_key(need("MQS_KEY")),
         endpoint=endpoint,
-        region=values.get("mqs.region") or _region(endpoint),
-        topic=values["mqs.topic"],
-        profile=values["mqs.profile"],
-        upstream=need("mqs.upstream") if server else "",
+        region=os.environ.get("MQS_REGION") or _region(endpoint),
+        topic=os.environ.get("MQS_TOPIC") or "mqs",  # both sides must match; override to blend into existing IoT traffic
+        profile=os.environ.get("MQS_PROFILE", ""),
+        upstream=need("MQS_UPSTREAM") if server else "",
     )
 
 

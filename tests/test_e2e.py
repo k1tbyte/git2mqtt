@@ -139,16 +139,15 @@ def served(sandbox, broker_port):
     home = sandbox.tmp / "serverhome"
     home.mkdir()
     sandbox.write_config("server", {
-        "mqs.endpoint": endpoint, "mqs.key": key, "mqs.upstream": sandbox.base,
         "url.mqs://.insteadOf": sandbox.base,  # gateway also has the rewrite: mirror must still reach upstream direct
         "core.hooksPath": str(sandbox.tmp / "global-hooks"),  # must not bypass the mirror's forwarding hook
     })
-    sandbox.write_config("client", {
-        "mqs.endpoint": endpoint, "mqs.key": key, "url.mqs://.insteadOf": sandbox.base,
-    })
+    sandbox.write_config("client", {"url.mqs://.insteadOf": sandbox.base})
+    sandbox.client_env.update(MQS_ENDPOINT=endpoint, MQS_KEY=key)
     proc = subprocess.Popen(
         [sys.executable, sandbox.helper, "serve"],
-        cwd=home, env=git_env(sandbox.tmp, "server", HOME=str(home), USERPROFILE=str(home)),
+        cwd=home, env=git_env(sandbox.tmp, "server", HOME=str(home), USERPROFILE=str(home),
+                              MQS_ENDPOINT=endpoint, MQS_KEY=key, MQS_UPSTREAM=sandbox.base),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8", errors="replace",
     )
     ready = threading.Event()
@@ -174,6 +173,7 @@ def test_fetch_gets_new_upstream_commit(served):
 
     assert served.git("rev-parse", "origin/main", cwd=served.local) == pushed
     assert served.upstream_refs()["refs/heads/main"] == pushed
+    assert (served.helper.parent / "mirrors").is_dir() and not (served.tmp / "serverhome" / ".mqs").exists()
 
 
 def test_push_updates_upstream_main(served):
@@ -204,11 +204,10 @@ def test_delete_removes_upstream_branch(served):
 
 
 def test_serve_exits_when_idle(sandbox, broker_port):
-    sandbox.write_config("server", {
-        "mqs.endpoint": f"tcp://127.0.0.1:{broker_port}", "mqs.key": crypto.keygen(), "mqs.upstream": sandbox.base,
-    })
+    env = git_env(sandbox.tmp, "server", MQS_ENDPOINT=f"tcp://127.0.0.1:{broker_port}", MQS_KEY=crypto.keygen(),
+                  MQS_UPSTREAM=sandbox.base)
 
-    proc = run([sys.executable, sandbox.helper, "serve", "--idle", "0.02"], env=git_env(sandbox.tmp, "server"))
+    proc = run([sys.executable, sandbox.helper, "serve", "--idle", "0.02"], env=env)
 
     assert proc.returncode == 0 and "closing connection" in proc.stdout, proc.stdout + proc.stderr
 
