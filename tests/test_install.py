@@ -31,3 +31,10 @@ def test_complete_env_replaces_blank_placeholder(tmp_path, monkeypatch):
     install.complete_env(tmp_path, tmp_path / "python", tmp_path / "mqs")
 
     assert env.read_text(encoding="utf-8").count("MQS_UPSTREAM") == 1
+
+
+def test_complete_env_skips_aws_keys_for_screen_transport(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text("MQS_ENDPOINT=screen://\nMQS_UPSTREAM=u\nMQS_KEY=k\n", encoding="utf-8")
+    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail(f"unexpected prompt: {prompt}"))
+
+    install.complete_env(tmp_path, tmp_path / "python", tmp_path / "mqs")

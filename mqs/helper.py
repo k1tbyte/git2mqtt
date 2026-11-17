@@ -7,8 +7,8 @@ import threading
 import time
 
 from . import config
-from .broker import Broker
 from .stream import CHUNK, DATA, END, ERROR, HELLO, READY, STATUS, Stream
+from .transport import connect
 
 IDLE = 60
 
@@ -29,7 +29,7 @@ def main():
 
 def tunnel(path: str, service: str) -> int:
     cfg = config.load()
-    broker = Broker(cfg)
+    broker = connect(cfg, server=False)
     try:
         stream = Stream(broker, cfg, secrets.token_hex(8), b"c")
         broker.subscribe(stream.recv_topic, lambda _, frame: stream.feed(frame))

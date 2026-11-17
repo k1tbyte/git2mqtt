@@ -10,10 +10,11 @@ import sys
 from pathlib import Path
 
 from . import envfile
+from .transport import SCREEN
 
 COMMAND = "mqs"
 GIT_HELPER = "git-remote-mqs"  # git looks up remote helpers by this exact name
-DEPS = ["awsiotsdk>=1.20", "cryptography>=42"]
+DEPS = ["awsiotsdk>=1.20", "cryptography>=42", "mss>=10.2.0", "numpy>=2.2.6"]  # mss, numpy: screen:// helper side only
 REQUIRED = {  # .env settings install asks for when missing; MQS_TOPIC, MQS_REGION, MQS_PROFILE are optional
     "MQS_ENDPOINT": "MQS_ENDPOINT (AWS IoT endpoint)",
     "MQS_UPSTREAM": "MQS_UPSTREAM (start of your repo URLs, with the trailing /)",
@@ -63,7 +64,8 @@ def complete_env(here: Path, py: Path, bundle: Path) -> dict[str, str]:
     env = envfile.read(path)
     added = {}
     for name, prompt in REQUIRED.items():
-        if env.get(name) or (name.startswith("AWS_") and env.get("MQS_PROFILE")):
+        no_aws = env.get("MQS_PROFILE") or (env | added).get("MQS_ENDPOINT") == SCREEN
+        if env.get(name) or (name.startswith("AWS_") and no_aws):
             continue
         if name == "AWS_SECRET_ACCESS_KEY":
             added[name] = getpass.getpass(f"{prompt} (hidden): ").strip()

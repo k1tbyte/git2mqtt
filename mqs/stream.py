@@ -10,7 +10,7 @@ from . import crypto
 from .config import Config
 
 HELLO, READY, DATA, STATUS, END, ERROR = range(6)
-CHUNK = 64 * 1024
+CHUNK = 16 * 1024  # on the screen link a push is ~680 B/s: 64 KiB would outlast the idle timeouts
 RATE = 400 * 1024  # bytes/s, below the AWS IoT 512 KiB/s per-connection cap
 MIN_GAP = 0.02  # s, below the AWS IoT 100 publishes/s per-connection cap
 HEARTBEAT = 10  # s; each side treats the peer's frames as its liveness signal

@@ -14,6 +14,7 @@ class Config:
     topic: str
     profile: str
     upstream: str
+    window: str = ""  # screen:// only: part of the RDP window title
 
     @property
     def base(self) -> str:
@@ -41,6 +42,7 @@ def load(server: bool = False) -> Config:
         topic=os.environ.get("MQS_TOPIC") or "mqs",  # both sides must match; override to blend into existing IoT traffic
         profile=os.environ.get("MQS_PROFILE", ""),
         upstream=need("MQS_UPSTREAM") if server else "",
+        window=os.environ.get("MQS_WINDOW", ""),
     )
 
 

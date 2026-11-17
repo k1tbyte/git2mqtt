@@ -6,6 +6,8 @@ requires-python = ">=3.10"
 dependencies = [
     "awsiotsdk>=1.20",
     "cryptography>=42",
+    "mss>=10.2.0",
+    "numpy>=2.2.6",
 ]
 
 [dependency-groups]

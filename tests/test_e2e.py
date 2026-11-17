@@ -132,10 +132,14 @@ def sandbox(tmp_path, helper):
     return Sandbox(tmp_path, helper)
 
 
-@pytest.fixture
-def served(sandbox, broker_port):
+SCREEN = pytest.param("screen", marks=pytest.mark.skipif(
+    not os.environ.get("MQS_SCREEN_LOOPBACK"), reason="covers the screen and types: set MQS_SCREEN_LOOPBACK=1"))
+
+
+@pytest.fixture(params=["mqtt", SCREEN])
+def served(request, sandbox, broker_port):
     key = crypto.keygen()
-    endpoint = f"tcp://127.0.0.1:{broker_port}"
+    endpoint = "screen://" if request.param == "screen" else f"tcp://127.0.0.1:{broker_port}"
     home = sandbox.tmp / "serverhome"
     home.mkdir()
     sandbox.write_config("server", {
@@ -143,7 +147,7 @@ def served(sandbox, broker_port):
         "core.hooksPath": str(sandbox.tmp / "global-hooks"),  # must not bypass the mirror's forwarding hook
     })
     sandbox.write_config("client", {"url.mqs://.insteadOf": sandbox.base})
-    sandbox.client_env.update(MQS_ENDPOINT=endpoint, MQS_KEY=key)
+    sandbox.client_env.update(MQS_ENDPOINT=endpoint, MQS_KEY=key, MQS_WINDOW="mqs screen")  # the gateway's own window
     proc = subprocess.Popen(
         [sys.executable, sandbox.helper, "serve"],
         cwd=home, env=git_env(sandbox.tmp, "server", HOME=str(home), USERPROFILE=str(home),

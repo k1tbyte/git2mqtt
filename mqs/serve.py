@@ -5,8 +5,8 @@ import threading
 import time
 
 from . import config, mirror
-from .broker import Broker
 from .stream import CHUNK, DATA, END, ERROR, HELLO, READY, STATUS, Stream
+from .transport import connect
 
 SERVICES = {"git-upload-pack", "git-receive-pack"}
 MAX_SKEW = 300
@@ -15,7 +15,7 @@ IDLE = 120
 
 def serve(idle_min: float = 2):
     cfg = config.load(server=True)
-    broker = Broker(cfg)
+    broker = connect(cfg, server=True)
     sessions: dict[str, Stream] = {}
     seen: set[str] = set()
     lock = threading.Lock()  # one user per serve: sessions run one at a time
