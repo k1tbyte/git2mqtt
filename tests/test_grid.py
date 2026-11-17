@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from mqs.screen.grid import CELL, capacity, render
-from mqs.screen.scan import decode
+from mqs.screen.scan import decode, is_blank
 
 
 def screenshot(frame, cols, rows, noise=20, seed=0):
@@ -26,6 +26,16 @@ def test_frame_survives_render_and_scan(cols, rows):
 
 def test_blank_screen_has_no_grid():
     assert decode(np.zeros((300, 300, 3), np.uint8)) is None
+
+
+def test_unfocused_gateway_is_blank_but_a_grid_or_desktop_is_not():
+    chrome = np.full((300, 300, 3), 255, np.uint8)
+    chrome[75:225, 75:225] = 0  # black window body inside the title bar and taskbar chrome
+    desktop = np.full((300, 300, 3), 90, np.uint8)
+
+    assert is_blank(chrome)
+    assert not is_blank(desktop)
+    assert not is_blank(screenshot(os.urandom(capacity(120, 70)), 120, 70))
 
 
 def test_oversized_frame_is_refused():

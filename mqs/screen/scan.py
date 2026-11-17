@@ -6,6 +6,12 @@ from .grid import BITS, PAL, RING, whiten
 _PAL = np.array(PAL, np.float32)
 
 
+def is_blank(img: np.ndarray) -> bool:
+    """The gateway window without its grid (it lost focus): black in the middle, whatever the chrome around."""
+    h, w = img.shape[:2]
+    return int(img[h // 4:3 * h // 4, w // 4:3 * w // 4].max()) < 24
+
+
 def decode(img: np.ndarray) -> bytes | None:
     """Frame bytes (zero-padded to capacity) of the grid in an RGB screenshot, None when no intact grid is seen.
     Wrong cells are not detected here: the link's CRC rejects the frame."""

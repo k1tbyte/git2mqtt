@@ -12,6 +12,8 @@ ALREADY_EXISTS = 183
 SW_MINIMIZE, SW_RESTORE = 6, 9
 WM_SYSCOMMAND, SC_MAXIMIZE = 0x0112, 0xF030
 GWL_STYLE, WS_CAPTION = -16, 0xC00000
+GA_ROOT = 2
+MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP = 2, 4
 
 
 class Window:
@@ -60,6 +62,22 @@ class Window:
         user32.ClientToScreen(self._hwnd, ctypes.byref(origin))
         shot = self._sct.grab({"left": origin.x, "top": origin.y, "width": rect.right, "height": rect.bottom})
         return np.ascontiguousarray(np.asarray(shot)[:, :, 2::-1])
+
+    def click_center(self):
+        """A real click activates the gateway's topmost window where its own focus_force() is refused. Skipped unless
+        the RDP window is what sits under the pointer, so the click can never land in another application."""
+        rect = wt.RECT()
+        user32.GetWindowRect(self._hwnd, ctypes.byref(rect))
+        x, y = (rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2
+        if user32.GetAncestor(user32.WindowFromPoint(wt.POINT(x, y)), GA_ROOT) != self._hwnd:
+            return
+        home = wt.POINT()
+        user32.GetCursorPos(ctypes.byref(home))
+        user32.SetCursorPos(x, y)
+        user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+        time.sleep(0.1)  # the RDP client forwards moves and clicks in order: the pointer goes back only after the click
+        user32.SetCursorPos(home.x, home.y)
 
     def minimize(self):
         user32.ShowWindow(self._hwnd, SW_MINIMIZE)  # a minimized window means: done, safe to leave

@@ -16,6 +16,7 @@ KEY_RTO = 8  # s; the remote may lag behind its typed backlog
 DRAIN = 30  # s to get the last messages acked on close
 NO_GRID_HINT = 15  # s
 GRID_FRESH = 3  # s the grid may be unseen before typing pauses
+REFOCUS = 3  # s between clicks into a blank gateway window
 
 
 class ScreenBroker:
@@ -77,13 +78,17 @@ class Client(ScreenBroker):
         self._window.minimize()
 
     def _capture(self):
-        from .scan import decode
-        start, warned = time.monotonic(), False
+        from .scan import decode, is_blank
+        start, warned, clicked = time.monotonic(), False, float("-inf")
         while not self._closed.is_set():
             now = time.monotonic()
-            if frame := decode(self._window.grab()):
+            img = self._window.grab()
+            if frame := decode(img):
                 self._grid_at, warned = now, False
                 self._link.feed(frame)
+            elif now - clicked > REFOCUS and is_blank(img):  # the gateway is up but lost focus: a click gives it back
+                clicked = now
+                self._window.click_center()
             elif not warned and now - max(start, self._grid_at) > NO_GRID_HINT:
                 warned = True
                 print(f"mqs: no grid on the screen for {NO_GRID_HINT} s, is `mqs serve` running in the RDP session?",

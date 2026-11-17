@@ -43,7 +43,7 @@ The gateway touches nothing outside its folder: no venv, no git config, no PATH.
 No network between the machines, only an RDP window: `MQS_ENDPOINT=screen://` and the same `MQS_KEY` and `MQS_UPSTREAM` in both `.env` files, plus `MQS_WINDOW=<part of the RDP window title>` on your machine. No AWS keys.
 
 - Gateway (inside the RDP session): python with tkinter, git, `cryptography`. `python mqs serve` covers the screen with a colored grid, Esc stops it.
-- Your machine: Windows, `mss` and `numpy` (install adds them). The helper switches the RDP window to fullscreen itself (no title bar, no scrollbars), so just use git as usual. Keep hands off keyboard and mouse while git runs: the helper focuses the window, types into it and minimizes it when done. One git command at a time.
+- Your machine: Windows, `mss` and `numpy` (install adds them). The helper switches the RDP window to fullscreen itself (no title bar, no scrollbars), so just use git as usual. Keep hands off keyboard and mouse while git runs: the helper focuses the window, types into it and minimizes it when done. If the gateway loses focus inside the session (its screen goes black), the helper clicks the middle of the window to bring it back. One git command at a time.
 - Speed: fetch up to ~200 KB/s, push ~680 B/s.
 - Check on one machine: `MQS_SCREEN_LOOPBACK=1 uv run pytest tests/test_e2e.py -k screen` (covers the screen and types for ~20 s).
 
